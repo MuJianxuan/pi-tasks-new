@@ -392,7 +392,7 @@ All tasks are created with status \`pending\`.
 - Include enough detail in the description for another agent to understand and complete the task
 - After creating tasks, use TaskUpdate to set up dependencies (blocks/blockedBy) if needed
 - Check TaskList first to avoid creating duplicate tasks
-- Include \`agentType\` (e.g., "general-purpose", "Explore") to mark tasks for subagent execution via TaskExecute`,
+- Optional: set \`agentType\` (e.g., "general-purpose", "Explore") only if this task should run as a subagent via TaskExecute; otherwise omit it.`,
     promptGuidelines: [
       "When working on complex multi-step tasks, use TaskCreate to track progress and TaskUpdate to update status.",
       "Mark tasks as in_progress before starting work and completed when done.",
@@ -832,6 +832,7 @@ Set up task dependencies:
 - **max_turns**: Maximum turns per agent`,
     promptGuidelines: [
       "Never use the Agent tool for tasks launched via TaskExecute — agents are already running.",
+      "Tasks require `agentType` to be executed — set it via the TaskCreate `agentType` parameter at creation, or via TaskUpdate metadata (e.g., {\"agentType\": \"general-purpose\"}) before calling TaskExecute; otherwise tasks are skipped."
     ],
     parameters: Type.Object({
       task_ids: Type.Array(Type.String(), { description: "Task IDs to execute as subagents" }),
