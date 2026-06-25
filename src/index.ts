@@ -8,13 +8,12 @@
  *   TaskUpdate   — Update task fields, status, dependencies
  *   TaskOutput   — Get output from a background task process
  *   TaskStop     — Stop a running background task process
- *   TaskExecute  — Execute tasks as subagents (requires @tintinweb/pi-subagents)
+ *   TaskExecute  — Execute tasks as subagents (requires @gotgenes/pi-subagents)
  *
  * Commands:
  *   /tasks       — Interactive task management menu
  */
 
-import { randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
@@ -29,6 +28,7 @@ import {
   resetCadenceState,
 } from "./reminder-cadence.js";
 import { TaskStore } from "./task-store.js";
+import { abortSubagent, getSubagentsService, spawnSubagent } from "./subagent-service.js";
 import { loadTasksConfig } from "./tasks-config.js";
 import { openSettingsMenu } from "./ui/settings-menu.js";
 import { TaskWidget, type UICtx } from "./ui/task-widget.js";
@@ -93,79 +93,6 @@ export default function (pi: ExtensionAPI) {
   /** Maps agent IDs to task IDs for O(1) completion lookup. */
   const agentTaskMap = new Map<string, string>();
 
-  // ── Subagent RPC helpers ──
-
-  /** RPC reply envelope — matches pi-mono's RpcResponse shape. */
-  type RpcReply<T = void> =
-    | { success: true; data?: T }
-    | { success: false; error: string };
-
-  /** Call a subagents RPC method: emit request, wait for scoped reply, unwrap envelope. */
-  function rpcCall<T>(channel: string, params: Record<string, unknown>, timeoutMs: number): Promise<T> {
-    const requestId = randomUUID();
-    debug(`rpc:send ${channel}`, { requestId });
-    return new Promise<T>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        unsub();
-        debug(`rpc:timeout ${channel}`, { requestId });
-        reject(new Error(`${channel} timeout`));
-      }, timeoutMs);
-      const unsub = pi.events.on(`${channel}:reply:${requestId}`, (raw: unknown) => {
-        unsub(); clearTimeout(timer);
-        debug(`rpc:reply ${channel}`, { requestId, raw });
-        const reply = raw as RpcReply<T>;
-        if (reply.success) resolve(reply.data as T);
-        else reject(new Error(reply.error));
-      });
-      pi.events.emit(channel, { requestId, ...params });
-      debug(`rpc:emitted ${channel}`, { requestId });
-    });
-  }
-
-  /** Spawn a subagent via pi.events RPC (requires @tintinweb/pi-subagents extension). */
-  function spawnSubagent(type: string, prompt: string, options?: any): Promise<string> {
-    debug("spawn:call", { type, options: { ...options, prompt: undefined } });
-    return rpcCall<{ id: string }>("subagents:rpc:spawn", { type, prompt, options }, 30_000)
-      .then(d => { debug("spawn:ok", d); return d.id; });
-  }
-
-  /** Stop a subagent via pi.events RPC (requires @tintinweb/pi-subagents extension). */
-  function stopSubagent(agentId: string): Promise<void> {
-    return rpcCall<void>("subagents:rpc:stop", { agentId }, 10_000).catch(() => {});
-  }
-
-  // ── Subagent extension presence & version detection ──
-  const PROTOCOL_VERSION = 2;
-  let subagentsAvailable = false;
-  let pendingWarning: string | undefined;
-
-  /** Ping subagents and check protocol version. Works with any handler version. */
-  function checkSubagentsVersion() {
-    const requestId = randomUUID();
-    const timer = setTimeout(() => { unsub(); }, 5_000);
-    const unsub = pi.events.on(`subagents:rpc:ping:reply:${requestId}`, (raw: unknown) => {
-      unsub(); clearTimeout(timer);
-      const remoteVersion = (raw as any)?.data?.version as number | undefined;
-      if (remoteVersion === undefined) {
-        pendingWarning =
-          "@tintinweb/pi-subagents is outdated — please update for task execution support.";
-      } else if (remoteVersion > PROTOCOL_VERSION) {
-        pendingWarning =
-          `@tintinweb/pi-tasks is outdated (protocol v${PROTOCOL_VERSION}, ` +
-          `pi-subagents has v${remoteVersion}) — please update for task execution support.`;
-      } else if (remoteVersion < PROTOCOL_VERSION) {
-        pendingWarning =
-          `@tintinweb/pi-subagents is outdated (protocol v${remoteVersion}, ` +
-          `pi-tasks has v${PROTOCOL_VERSION}) — please update for task execution support.`;
-      } else {
-        subagentsAvailable = true;
-      }
-    });
-    pi.events.emit("subagents:rpc:ping", { requestId });
-  }
-
-  checkSubagentsVersion();
-  pi.events.on("subagents:ready", () => checkSubagentsVersion());
 
   /** Build a prompt for a task being executed by a subagent.
    *  Injects completed dependency results so cascaded agents have context from prerequisites.
@@ -229,7 +156,7 @@ export default function (pi: ExtensionAPI) {
         try {
           const agentId = await spawnSubagent(next.metadata.agentType, prompt, {
             description: next.subject,
-            isBackground: true,
+            foreground: false,
             maxTurns: cascadeConfig.maxTurns,
             ...(cascadeConfig.model ? { model: cascadeConfig.model } : {}),
           });
@@ -384,10 +311,6 @@ export default function (pi: ExtensionAPI) {
     widget.setUICtx(ctx.ui as UICtx);
     upgradeStoreIfNeeded(ctx);
     showPersistedTasks();
-    if (pendingWarning) {
-      ctx.ui.notify(pendingWarning, "warning");
-      pendingWarning = undefined;
-    }
   });
 
   // session_switch fires on /new (reason: "new") and /resume (reason: "resume").
@@ -870,7 +793,7 @@ Set up task dependencies:
         if (task?.metadata?.agentId && task.status === "in_progress") {
           store.update(taskId, { status: "completed" });
           autoClear.trackCompletion(taskId, cadence.currentTurn);
-          await stopSubagent(task.metadata.agentId);
+          await abortSubagent(task.metadata.agentId);
           widget.setActiveTask(taskId, false);
           widget.update();
           return textResult(`Task #${taskId} stopped successfully`);
@@ -918,10 +841,11 @@ Set up task dependencies:
     }),
 
     async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
-      if (!subagentsAvailable) {
+      const subagents = await getSubagentsService();
+      if (!subagents) {
         return textResult(
           "Subagent execution is currently unavailable. " +
-          "Ensure the @tintinweb/pi-subagents extension is loaded and try again."
+          "Ensure the @gotgenes/pi-subagents extension is loaded and try again."
         );
       }
 
@@ -953,13 +877,13 @@ Set up task dependencies:
           continue;
         }
 
-        // Mark in_progress and spawn agent via RPC
+        // Mark in_progress and spawn agent via the subagent service
         store.update(taskId, { status: "in_progress" });
         const prompt = buildTaskPrompt(task, params.additional_context);
         try {
           const agentId = await spawnSubagent(task.metadata.agentType, prompt, {
             description: task.subject,
-            isBackground: true,
+            foreground: false,
             maxTurns: params.max_turns,
             ...(params.model ? { model: params.model } : {}),
           });

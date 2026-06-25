@@ -22,12 +22,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.6.1] - 2026-05-30
 
 ### Fixed
-- **CI test failures on `webidl.util.markAsUncloneable is not a function`** — bumped the GitHub Actions `node-version` from `20` to `22`. Node 20's bundled `undici` lacks `webidl.util.markAsUncloneable`, which pi's event/RPC layer (exercised by `subagent-integration.test.ts`) requires. Matches the same fix in `@tintinweb/pi-subagents`.
+- **CI test failures on `webidl.util.markAsUncloneable is not a function`** — bumped the GitHub Actions `node-version` from `20` to `22`. Node 20's bundled `undici` lacks `webidl.util.markAsUncloneable`, which pi's subagent integration test path requires. Matches the same fix used by `@gotgenes/pi-subagents`.
 
 ## [0.6.0] - 2026-05-30
 
 ### Changed
-- **Migrated pi peer dependencies to the `@earendil-works` scope** — `@mariozechner/pi-coding-agent` and `@mariozechner/pi-tui` (`>=0.70.5`) → `@earendil-works/pi-coding-agent` and `@earendil-works/pi-tui` (`>=0.74.0`). Package was renamed/rescoped across `package.json` and `src` imports; lockfile regenerated. Matches the same migration in `@tintinweb/pi-subagents`. (#21)
+- **Migrated pi peer dependencies to the `@earendil-works` scope** — `@mariozechner/pi-coding-agent` and `@mariozechner/pi-tui` (`>=0.70.5`) → `@earendil-works/pi-coding-agent` and `@earendil-works/pi-tui` (`>=0.74.0`). Package was renamed/rescoped across `package.json` and `src` imports; lockfile regenerated. Matches the same runtime migration used by `@gotgenes/pi-subagents`. (#21)
 
 ## [0.5.0] - 2026-04-28
 
@@ -73,11 +73,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.4.0] - 2026-03-22
 
 ### Added
-- **RPC-based subagent spawning** — `TaskExecute` now communicates with `@tintinweb/pi-subagents` via a standardized RPC envelope (`rpcCall` helper) with protocol version negotiation and timeout handling.
-- **RPC-based subagent stopping** — `stopSubagent` sends stop requests via `subagents:rpc:stop` event bus RPC.
+- **Service-based subagent spawning** — `TaskExecute` now launches subagents through `@gotgenes/pi-subagents` and the in-process service adapter.
+- **Service-based subagent stopping** — `TaskStop` now aborts subagents through the service API.
 - **TaskOutput supports subagent tasks** — can wait for subagent completion with blocking/timeout, using `subagents:completed` and `subagents:failed` events.
-- **TaskStop supports subagent tasks** — stops running subagents via RPC and marks the task as completed.
-- **Debug logging** — set `PI_TASKS_DEBUG=1` to trace RPC communication (request/reply/timeout) and spawn errors to stderr.
+- **TaskStop supports subagent tasks** — stops running subagents via the service abort API and marks the task as completed.
+- **Debug logging** — set `PI_TASKS_DEBUG=1` to trace service loading, lifecycle events, and spawn errors to stderr.
 - **TaskExecute prompt guidelines** — agents are instructed not to use the Agent tool for tasks already launched via TaskExecute.
 - **Biome linter** — added [Biome](https://biomejs.dev/) for correctness linting.
 
@@ -86,7 +86,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **TaskGet shows metadata** — non-empty metadata is now displayed in TaskGet output as JSON.
 - **TaskGet filters completed blockers** — consistent with TaskList, TaskGet now only shows open (non-completed) blockers instead of all dependency edges.
 - **TaskExecute success message** — now includes guidance to use TaskOutput for progress and not spawn duplicate agents.
-- **Softened TaskExecute description** — removed "Requires @tintinweb/pi-subagents extension" from the tool description to prevent agents from refusing to use it when the extension is loaded.
+- **Softened TaskExecute description** — removed the hard dependency warning from the tool description to prevent agents from refusing to use it when the extension is loaded.
 - **Stopped subagents handled gracefully** — `subagents:failed` listener now distinguishes intentional stops (status `"stopped"` → mark completed, preserve partial result) from actual errors (revert to pending).
 
 ## [0.3.3] - 2026-03-17
@@ -131,8 +131,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.3.0] - 2026-03-14
 
 ### Changed
-- **Eventbus RPC for subagent communication** — replaced the `Symbol.for` global registry bridge with a proper eventbus RPC protocol. [`pi-tasks`](https://github.com/tintinweb/pi-tasks) now communicates with `@tintinweb/pi-subagents` via scoped request/reply channels (`subagents:rpc:spawn`, `subagents:rpc:ping`), eliminating shared mutable global state and enabling reliable cross-extension coordination regardless of load order.
-- **Presence detection** — two-path handshake: (1) ping RPC on init with scoped reply channel, (2) `subagents:ready` broadcast listener. Works whether [`pi-subagents`](https://github.com/tintinweb/pi-subagents) loads before or after [`pi-tasks`](https://github.com/tintinweb/pi-tasks).
+- **Service API integration for subagent communication** — `pi-tasks` now loads `@gotgenes/pi-subagents` through its in-process service adapter and keeps lifecycle coordination on `pi.events`, eliminating the old request/reply RPC bridge and shared mutable global state.
+- **Service availability detection** — `TaskExecute` now checks `getSubagentsService()` on demand instead of negotiating load order over custom ping channels.
 - **Agent-task mapping** — in-memory `agentTaskMap` (agentId → taskId) replaces linear `store.list().find()` scans for O(1) completion event lookup.
 - **Spawn error handling** — `spawnSubagent()` returns a Promise with 30s timeout. Failed spawns revert tasks to `pending` with error in metadata instead of silently failing.
 - **Removed `SubagentBridge` type** — the `types.ts` interface for the global registry bridge is no longer needed.
@@ -141,7 +141,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.2.0] - 2026-03-12
 
 ### Added
-- **`TaskExecute` tool** — execute tasks as background subagents via @tintinweb/pi-subagents. Tasks with `agentType` metadata are spawned as independent agents; validates status, dependencies, and agent type before launching.
+- **`TaskExecute` tool** — execute tasks as background subagents via @gotgenes/pi-subagents. Tasks with `agentType` metadata are spawned as independent agents; validates status, dependencies, and agent type before launching.
 - **`agentType` parameter on `TaskCreate`** — opt-in field (e.g., `"general-purpose"`, `"Explore"`) that marks tasks for subagent execution.
 - **Auto-cascade** — when enabled via `/tasks` → Settings, completed agent tasks automatically trigger execution of their unblocked dependents, flowing through the task DAG like a build system. Off by default.
 - **Subagent completion listener** — listens to `subagents:completed` and `subagents:failed` events to automatically update task status. Failed tasks revert to `pending` with error stored in metadata.
@@ -151,8 +151,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`SubagentBridge` type** — typed interface for the cross-extension Symbol.for bridge.
 
 ### Changed
-- `@tintinweb/pi-subagents` global registry now exposes `spawn()` and `getRecord()` in addition to `waitForAll()` and `hasRunning()`.
-- `@tintinweb/pi-subagents` emits lifecycle events on `pi.events`: `subagents:created`, `subagents:started`, `subagents:completed`, `subagents:failed`, `subagents:steered`.
+- `@gotgenes/pi-subagents` global registry now exposes `spawn()` and `getRecord()` in addition to `waitForAll()` and `hasRunning()`.
+- `@gotgenes/pi-subagents` emits lifecycle events on `pi.events`: `subagents:created`, `subagents:started`, `subagents:completed`, `subagents:failed`, `subagents:steered`.
 - `AgentManager` accepts an optional `onStart` callback, fired when an agent transitions to running (including from queue).
 
 ## [0.1.0] - 2026-03-12

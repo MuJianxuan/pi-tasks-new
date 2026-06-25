@@ -20,7 +20,7 @@ https://github.com/user-attachments/assets/1d0ee87a-e0a5-4bfa-a9b9-2f9144cb905b
 - **Shared task lists** — multiple pi sessions can share a file-backed task list for agent team coordination
 - **File locking** — concurrent access is safe when multiple sessions share a task list
 - **Background process tracking** — track spawned processes with output buffering, blocking wait, and graceful stop
-- **Subagent integration** — tasks with `agentType` can be executed as subagents via `TaskExecute` (requires [@tintinweb/pi-subagents](https://github.com/tintinweb/pi-subagents)). Auto-cascade mode flows through the task DAG automatically when enabled.
+- **Subagent integration** — tasks with `agentType` can be executed as subagents via `TaskExecute` (requires [@gotgenes/pi-subagents](https://github.com/gotgenes/pi-packages/tree/main/packages/pi-subagents)). Auto-cascade mode flows through the task DAG automatically when enabled.
 
 ## Install
 
@@ -153,7 +153,7 @@ Both task IDs and agent IDs (including partial prefixes) are accepted — agent 
 
 ### `TaskStop`
 
-Stop a running background task process. Sends SIGTERM, waits 5 seconds, then SIGKILL. For subagent tasks, sends a stop RPC.
+Stop a running background task process. Sends SIGTERM, waits 5 seconds, then SIGKILL. For subagent tasks, calls the subagent service abort API.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -161,7 +161,7 @@ Stop a running background task process. Sends SIGTERM, waits 5 seconds, then SIG
 
 ### `TaskExecute`
 
-Execute one or more tasks as background subagents. Requires [@tintinweb/pi-subagents](https://github.com/tintinweb/pi-subagents).
+Execute one or more tasks as background subagents. Requires [@gotgenes/pi-subagents](https://github.com/gotgenes/pi-packages/tree/main/packages/pi-subagents).
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -226,7 +226,7 @@ Settings (`taskScope`, `autoCascade`, `autoClearCompleted`, plus the [widget dis
 | `PI_TASKS` | `/abs/path/tasks.json` | Explicit absolute file path |
 | `PI_TASKS` | `./tasks.json` | Relative path resolved from cwd |
 | *(unset)* | | Uses `taskScope` setting (default: `session`) |
-| `PI_TASKS_DEBUG` | `1` | Trace RPC communication (request/reply/timeout) and spawn errors to stderr |
+| `PI_TASKS_DEBUG` | `1` | Trace subagent service loading, lifecycle events, and spawn errors to stderr |
 
 Named and explicit paths use a file-locked store with stale-lock detection — safe for multiple pi sessions coordinating on the same task list.
 
@@ -259,46 +259,44 @@ Tasks
 - **Clear all** — remove all tasks regardless of status
 - **Settings** — configure task storage, auto-cascade, auto-clear completed tasks, and [widget display](#widget-display-settings) (sort order, max visible, show all, hidden position) — saved to `tasks-config.json`
 
-## Cross-extension Communication with [`@tintinweb/pi-subagents`](https://github.com/tintinweb/pi-subagents)
+## Cross-extension Communication with [`@gotgenes/pi-subagents`](https://github.com/gotgenes/pi-packages/tree/main/packages/pi-subagents)
 
-[`pi-tasks`](https://github.com/tintinweb/pi-tasks) communicates with [`@tintinweb/pi-subagents`](https://github.com/tintinweb/pi-subagents) via pi's eventbus using a scoped request/reply RPC protocol. No shared global state — just events.
+[`pi-tasks`](https://github.com/tintinweb/pi-tasks) integrates with [`@gotgenes/pi-subagents`](https://github.com/gotgenes/pi-packages/tree/main/packages/pi-subagents) through its in-process Service API. `TaskExecute` and `TaskStop` load the service on demand, while lifecycle completion/failure events still flow through `pi.events`.
 
-### Presence Detection
+### Service Loading
 
-Load order doesn't matter. Two handshake paths ensure detection regardless of which extension loads first:
-
-1. **Ping on init** — [`pi-tasks`](https://github.com/tintinweb/pi-tasks) emits `subagents:rpc:ping` with a unique `requestId` and listens for `subagents:rpc:ping:reply:{requestId}`. If [`pi-subagents`](https://github.com/tintinweb/pi-subagents) is already loaded, it replies immediately.
-2. **Ready broadcast** — [`pi-subagents`](https://github.com/tintinweb/pi-subagents) emits `subagents:ready` when it initializes. If [`pi-tasks`](https://github.com/tintinweb/pi-tasks) loaded first, it picks this up.
+Load order is no longer negotiated over custom request/reply channels. `TaskExecute` simply calls `getSubagentsService()` and proceeds when the service is available.
 
 ```
-┌─────────────┐                    ┌──────────────────┐
-│  pi-tasks   │                    │  pi-subagents    │
-└──────┬──────┘                    └────────┬─────────┘
-       │                                    │
-       │──── subagents:rpc:ping ───────────▶│
-       │◀─── subagents:rpc:ping:reply ──────│
-       │                                    │
-       │◀─── subagents:ready ───────────────│  (broadcast on init)
-       │                                    │
+pi-tasks
+   │
+   ├─▶ import("@gotgenes/pi-subagents")
+   ├─▶ getSubagentsService()
+   └─▶ service.spawn() / service.abort()
 ```
 
 ### Spawning Subagents
 
-When `TaskExecute` runs, it sends a spawn RPC with a scoped reply channel:
+When `TaskExecute` runs, it uses the loaded service directly:
 
 ```
-pi-tasks                                pi-subagents
-   │                                         │
-   │── subagents:rpc:spawn ─────────────────▶│  { requestId, type, prompt, options }
-   │◀─ subagents:rpc:spawn:reply:{reqId} ───│  { id }  (or { error })
-   │                                         │
+pi-tasks
+   │
+   ├─▶ service.spawn(type, prompt, {
+   │     description,
+   │     model,
+   │     maxTurns,
+   │     foreground: false,
+   │   })
+   │
+   └─▶ agent id
 ```
 
-The returned `id` is stored in an in-memory `agentTaskMap` (agentId → taskId) for O(1) completion lookup. A 30-second timeout rejects the Promise if no reply arrives.
+The returned `id` is stored in an in-memory `agentTaskMap` (agentId → taskId) for O(1) completion lookup.
 
 ### Lifecycle Events
 
-[`pi-subagents`](https://github.com/tintinweb/pi-subagents) emits lifecycle events that [`pi-tasks`](https://github.com/tintinweb/pi-tasks) listens to:
+[`@gotgenes/pi-subagents`](https://github.com/gotgenes/pi-packages/tree/main/packages/pi-subagents) emits lifecycle events that [`pi-tasks`](https://github.com/tintinweb/pi-tasks) listens to:
 
 | Event | Payload | Action |
 |-------|---------|--------|
@@ -307,7 +305,7 @@ The returned `id` is stored in an in-memory `agentTaskMap` (agentId → taskId) 
 
 ### Standalone Mode
 
-If [`pi-subagents`](https://github.com/tintinweb/pi-subagents) is not installed, everything works except `TaskExecute`, which returns a friendly error message. All core task tools (create, list, get, update, dependencies, widget, system-reminder injection) function independently.
+If [`@gotgenes/pi-subagents`](https://github.com/gotgenes/pi-packages/tree/main/packages/pi-subagents) is not installed, everything works except `TaskExecute`, which returns a friendly error message. All core task tools (create, list, get, update, dependencies, widget, system-reminder injection) function independently.
 
 ## Architecture
 

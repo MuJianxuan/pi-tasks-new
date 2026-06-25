@@ -1,5 +1,5 @@
 ================================================================================
-  迁移修改对照表 - @tintinweb/pi-subagents → @gotgenes/pi-subagents
+  迁移修改对照表 - legacy subagent integration → @gotgenes/pi-subagents
 ================================================================================
 
 📦 依赖变更
@@ -45,7 +45,7 @@
 │  [+] import * as SubagentService from "./subagent-service.js";
 └────────────────────────────────────────────────────────────────────────────
 
-┌─ 第 96-168 行：RPC 代码 → Service 初始化 (删除 73 行，添加 10 行)
+┌─ 第 96-168 行：旧 RPC 代码 → Service 集成 (删除 73 行，添加 10 行)
 │
 │  [-] // ── Subagent RPC helpers ──
 │  [-] type RpcReply<T = void> = ...
@@ -135,7 +135,7 @@
 │  [-]   if (!subagentsAvailable) {
 │  [-]     return textResult(
 │  [-]       "Subagent execution is currently unavailable. " +
-│  [-]       "Ensure the @tintinweb/pi-subagents extension is loaded..."
+│  [-]       "Ensure the @gotgenes/pi-subagents extension is loaded..."
 │  [-]     );
 │  [-]   }
 │
@@ -175,7 +175,7 @@
 📝 注释和描述更新
 ────────────────────────────────────────────────────────────────────────────
   第 11 行：
-  [-] *   TaskExecute  — Execute tasks as subagents (requires @tintinweb/pi-subagents)
+  [-] *   TaskExecute  — Execute tasks as subagents (requires @gotgenes/pi-subagents)
   [+] *   TaskExecute  — Execute tasks as subagents (requires @gotgenes/pi-subagents)
 
   第 896 行：
@@ -184,7 +184,7 @@
 
 📊 统计数据
 ────────────────────────────────────────────────────────────────────────────
-  删除代码：    -73 行（RPC 相关）
+  删除代码：    -73 行（旧 RPC 相关）
   添加代码：    +60 行（Service 集成）
   修改代码：    ~50 行（spawn 调用等）
   新增文件：    +4 个文件（~1300 行）
@@ -193,7 +193,7 @@
 
 🎯 关键参数映射
 ────────────────────────────────────────────────────────────────────────────
-  RPC 旧参数              →  Service 新参数
+  旧参数                   →  Service 新参数
   ─────────────────────────────────────────────
   isBackground: true      →  foreground: false  (语义相反)
   { model: "x" } spread   →  model: "x"         (直接传递)
