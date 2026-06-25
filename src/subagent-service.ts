@@ -6,7 +6,7 @@
  * extension is not installed.
  */
 
-import type { SubagentsService, SubagentRecord } from "@gotgenes/pi-subagents";
+import type { SubagentRecord, SubagentsService } from "@gotgenes/pi-subagents";
 
 const DEBUG = !!process.env.PI_TASKS_DEBUG;
 function debug(...args: unknown[]) {
