@@ -1,5 +1,5 @@
 /**
- * @tintinweb/pi-tasks — A pi extension providing Claude Code-style task tracking and coordination.
+ * @raoxxxwq/pi-tasks — A pi extension providing Claude Code-style task tracking and coordination.
  *
  * Tools:
  *   TaskCreate   — Create a structured task

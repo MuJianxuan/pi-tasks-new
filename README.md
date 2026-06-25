@@ -1,4 +1,4 @@
-# @tintinweb/pi-tasks
+# @raoxxxwq/pi-tasks
 
 A [pi](https://pi.dev) extension that brings **Claude Code-style task tracking and coordination** to pi. Track multi-step work with structured tasks, dependency management, and a persistent visual widget.
 
@@ -25,7 +25,7 @@ https://github.com/user-attachments/assets/1d0ee87a-e0a5-4bfa-a9b9-2f9144cb905b
 ## Install
 
 ```bash
-pi install npm:@tintinweb/pi-tasks
+pi install npm:@raoxxxwq/pi-tasks
 ```
 
 Or load directly for development:
