@@ -1,6 +1,6 @@
 {
   "name": "@tintinweb/pi-tasks",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "A pi extension that brings Claude Code-style task tracking and coordination to pi.",
   "author": "tintinweb",
   "license": "MIT",
@@ -24,6 +24,14 @@
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": ">=0.74.0",
     "@earendil-works/pi-tui": ">=0.74.0"
+  },
+  "peerDependenciesMeta": {
+    "@gotgenes/pi-subagents": {
+      "optional": true
+    }
+  },
+  "optionalDependencies": {
+    "@gotgenes/pi-subagents": ">=18.0.0"
   },
   "dependencies": {
     "typebox": "^1.1.34"

@@ -1,0 +1,234 @@
+================================================================================
+  迁移修改对照表 - @tintinweb/pi-subagents → @gotgenes/pi-subagents
+================================================================================
+
+📦 依赖变更
+────────────────────────────────────────────────────────────────────────────
+  package.json
+  
+  添加：
+  ├─ "peerDependenciesMeta": {
+  │    "@gotgenes/pi-subagents": { "optional": true }
+  │  }
+  └─ "optionalDependencies": {
+       "@gotgenes/pi-subagents": ">=18.0.0"
+     }
+
+📄 新文件
+────────────────────────────────────────────────────────────────────────────
+  ✨ src/subagent-service.ts (180 行)
+     - Service API 适配器
+     - 类型安全封装
+     - 优雅降级处理
+
+  ✨ MIGRATION_GUIDE.md (438 行)
+     - 完整迁移指南
+     - 8 个详细步骤
+     - 测试清单
+
+  ✨ QUICK_REFERENCE.md (320 行)
+     - 快速参考手册
+     - 代码替换模式
+     - 调试技巧
+
+  ✨ SUMMARY.md (370 行)
+     - 修改方案总结
+     - 核心变更概要
+     - 验证步骤
+
+🔧 src/index.ts 修改清单
+────────────────────────────────────────────────────────────────────────────
+
+┌─ 第 17 行：导入语句
+│
+│  [-] import { randomUUID } from "node:crypto";
+│  [+] import * as SubagentService from "./subagent-service.js";
+└────────────────────────────────────────────────────────────────────────────
+
+┌─ 第 96-168 行：RPC 代码 → Service 初始化 (删除 73 行，添加 10 行)
+│
+│  [-] // ── Subagent RPC helpers ──
+│  [-] type RpcReply<T = void> = ...
+│  [-] function rpcCall<T>(...) { ... }
+│  [-] function spawnSubagent(...) { ... }
+│  [-] function stopSubagent(...) { ... }
+│  [-] const PROTOCOL_VERSION = 2;
+│  [-] let subagentsAvailable = false;
+│  [-] function checkSubagentsVersion() { ... }
+│  [-] checkSubagentsVersion();
+│  [-] pi.events.on("subagents:ready", ...);
+│
+│  [+] // ── Subagent Service integration ──
+│  [+] let serviceInitialized = false;
+│  [+] async function ensureServiceReady(): Promise<boolean> {
+│  [+]   if (serviceInitialized) return SubagentService.isServiceAvailable();
+│  [+]   serviceInitialized = true;
+│  [+]   const service = await SubagentService.getSubagentsService();
+│  [+]   return service !== undefined;
+│  [+] }
+└────────────────────────────────────────────────────────────────────────────
+
+┌─ 第 222-227 行：级联 spawn 调用
+│
+│  [-] const agentId = await spawnSubagent(next.metadata.agentType, prompt, {
+│  [-]   description: next.subject,
+│  [-]   isBackground: true,
+│  [-]   maxTurns: cascadeConfig.maxTurns,
+│  [-]   ...(cascadeConfig.model ? { model: cascadeConfig.model } : {}),
+│  [-] });
+│
+│  [+] const agentId = await SubagentService.spawnSubagent(
+│  [+]   next.metadata.agentType,
+│  [+]   prompt,
+│  [+]   {
+│  [+]     description: next.subject,
+│  [+]     model: cascadeConfig.model,
+│  [+]     maxTurns: cascadeConfig.maxTurns,
+│  [+]     foreground: false,
+│  [+]   }
+│  [+] );
+└────────────────────────────────────────────────────────────────────────────
+
+┌─ 第 729-758 行：TaskStop 工具
+│
+│  [-] await stopSubagent(taskIdOrAgentId);
+│
+│  [+] const stopped = await SubagentService.abortSubagent(taskIdOrAgentId);
+│  [+] if (stopped) {
+│  [+]   return textResult(`Stopped agent ${taskIdOrAgentId}`);
+│  [+] } else {
+│  [+]   return textResult(`Agent not found or already stopped`);
+│  [+] }
+└────────────────────────────────────────────────────────────────────────────
+
+┌─ 第 760-888 行：TaskOutput 工具
+│
+│  [+] // Try to get subagent record
+│  [+] const record = await SubagentService.getSubagentRecord(taskIdOrAgentId);
+│  [+] if (record) {
+│  [+]   if (params.block && record.status === "running") {
+│  [+]     // Wait for completion
+│  [+]     agentResult = await new Promise<string>((resolve) => {
+│  [+]       const timeout = Math.min(params.timeout || 30000, 600000);
+│  [+]       const timer = setTimeout(() => {
+│  [+]         unsub();
+│  [+]         resolve("(timeout waiting for agent)");
+│  [+]       }, timeout);
+│  [+]       
+│  [+]       const unsub = pi.events.on("subagents:completed", (data: any) => {
+│  [+]         if (data.id === taskIdOrAgentId) {
+│  [+]           clearTimeout(timer);
+│  [+]           unsub();
+│  [+]           resolve(data.result || "(completed with no output)");
+│  [+]         }
+│  [+]       });
+│  [+]     });
+│  [+]   } else {
+│  [+]     agentResult = record.result || `(agent ${record.status})`;
+│  [+]   }
+│  [+] }
+└────────────────────────────────────────────────────────────────────────────
+
+┌─ 第 920-926 行：TaskExecute 可用性检查
+│
+│  [-] async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+│  [-]   if (!subagentsAvailable) {
+│  [-]     return textResult(
+│  [-]       "Subagent execution is currently unavailable. " +
+│  [-]       "Ensure the @tintinweb/pi-subagents extension is loaded..."
+│  [-]     );
+│  [-]   }
+│
+│  [+] async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+│  [+]   latestCtx = ctx; // 保存最新的上下文用于级联
+│  [+]   
+│  [+]   const serviceReady = await ensureServiceReady();
+│  [+]   if (!serviceReady) {
+│  [+]     return textResult(
+│  [+]       "Subagent execution unavailable. " +
+│  [+]       "Install with: pi install npm:@gotgenes/pi-subagents"
+│  [+]     );
+│  [+]   }
+└────────────────────────────────────────────────────────────────────────────
+
+┌─ 第 959-974 行：TaskExecute spawn 调用
+│
+│  [-] const agentId = await spawnSubagent(task.metadata.agentType, prompt, {
+│  [-]   description: task.subject,
+│  [-]   isBackground: true,
+│  [-]   maxTurns: params.max_turns,
+│  [-]   ...(params.model ? { model: params.model } : {}),
+│  [-] });
+│
+│  [+] const agentId = await SubagentService.spawnSubagent(
+│  [+]   task.metadata.agentType,
+│  [+]   prompt,
+│  [+]   {
+│  [+]     description: task.subject,
+│  [+]     model: params.model,
+│  [+]     maxTurns: params.max_turns,
+│  [+]     foreground: false,
+│  [+]   }
+│  [+] );
+└────────────────────────────────────────────────────────────────────────────
+
+📝 注释和描述更新
+────────────────────────────────────────────────────────────────────────────
+  第 11 行：
+  [-] *   TaskExecute  — Execute tasks as subagents (requires @tintinweb/pi-subagents)
+  [+] *   TaskExecute  — Execute tasks as subagents (requires @gotgenes/pi-subagents)
+
+  第 896 行：
+  [+] Requires @gotgenes/pi-subagents extension. 
+  [+] Install with: pi install npm:@gotgenes/pi-subagents
+
+📊 统计数据
+────────────────────────────────────────────────────────────────────────────
+  删除代码：    -73 行（RPC 相关）
+  添加代码：    +60 行（Service 集成）
+  修改代码：    ~50 行（spawn 调用等）
+  新增文件：    +4 个文件（~1300 行）
+  
+  净变化：      src/index.ts -13 行（更简洁）
+
+🎯 关键参数映射
+────────────────────────────────────────────────────────────────────────────
+  RPC 旧参数              →  Service 新参数
+  ─────────────────────────────────────────────
+  isBackground: true      →  foreground: false  (语义相反)
+  { model: "x" } spread   →  model: "x"         (直接传递)
+  maxTurns                →  maxTurns           (相同)
+  description             →  description        (相同)
+  -                       →  inheritContext     (新增)
+
+✅ 不需要修改的部分
+────────────────────────────────────────────────────────────────────────────
+  ✓ 事件监听器（subagents:completed / subagents:failed）
+  ✓ buildTaskPrompt() 函数
+  ✓ TaskStore、ProcessTracker、Widget 等核心组件
+  ✓ 任务存储格式
+  ✓ 自动级联逻辑（只需改 spawn 调用）
+
+🚀 快速开始
+────────────────────────────────────────────────────────────────────────────
+  1. 备份代码：
+     git commit -am "backup before migration"
+
+  2. 安装新依赖：
+     pi install npm:@gotgenes/pi-subagents
+
+  3. 按照修改清单逐步操作
+
+  4. 验证：
+     npm run typecheck && npm test && npm run build
+
+⏱️ 预计时间：1.5-2.5 小时（包括测试）
+
+📚 详细文档
+────────────────────────────────────────────────────────────────────────────
+  MIGRATION_GUIDE.md   - 完整迁移步骤
+  QUICK_REFERENCE.md   - 快速查找
+  SUMMARY.md           - 方案总结
+  CHANGES.txt          - 本文件
+
+================================================================================
