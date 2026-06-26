@@ -159,6 +159,29 @@ export class TaskStore {
     return Array.from(this.tasks.values()).sort(SORT_FNS[sortOrder]);
   }
 
+  /**
+   * Reset stale execution metadata left behind by removed execution tools.
+   * Any unfinished task that still carries the old execution marker should be
+   * made manually actionable again.
+   */
+  migrateLegacyExecutionTasks(): number {
+    return this.withLock(() => {
+      let count = 0;
+      for (const task of this.tasks.values()) {
+        const hasLegacyAgentId = typeof task.metadata?.agentId === "string";
+        const isUnfinished = task.status === "pending" || task.status === "in_progress";
+        if (isUnfinished && hasLegacyAgentId) {
+          task.status = "pending";
+          delete task.metadata.agentId;
+          task.metadata.lastError = "Legacy execution state was reset after execution tools were removed";
+          task.updatedAt = Date.now();
+          count++;
+        }
+      }
+      return count;
+    });
+  }
+
   update(id: string, fields: {
     status?: TaskStatus | "deleted";
     subject?: string;

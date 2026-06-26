@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Removed `TaskOutput`, `TaskStop`, and `TaskExecute` to keep the package focused on core task management. The extension now documents and supports 4 tools: `TaskCreate`, `TaskList`, `TaskGet`, and `TaskUpdate`.
+- Removed subagent execution and background process tracking code paths, the related optional dependency, and the obsolete settings and docs that described them.
+
 ## [0.7.0] - 2026-05-30
 
 ### Changed

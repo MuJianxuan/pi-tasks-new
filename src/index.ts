@@ -6,9 +6,6 @@
  *   TaskList     — List all tasks with status
  *   TaskGet      — Get full task details
  *   TaskUpdate   — Update task fields, status, dependencies
- *   TaskOutput   — Get output from a background task process
- *   TaskStop     — Stop a running background task process
- *   TaskExecute  — Execute tasks as subagents (requires @gotgenes/pi-subagents)
  *
  * Commands:
  *   /tasks       — Interactive task management menu
@@ -18,7 +15,6 @@ import { join, resolve } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { AutoClearManager } from "./auto-clear.js";
-import { ProcessTracker } from "./process-tracker.js";
 import {
   type CadenceConfig,
   createCadenceState,
@@ -27,18 +23,10 @@ import {
   onTurnStart,
   resetCadenceState,
 } from "./reminder-cadence.js";
-import { abortSubagent, getSubagentsService, spawnSubagent } from "./subagent-service.js";
 import { TaskStore } from "./task-store.js";
 import { loadTasksConfig } from "./tasks-config.js";
 import { openSettingsMenu } from "./ui/settings-menu.js";
 import { TaskWidget, type UICtx } from "./ui/task-widget.js";
-
-// ---- Debug ----
-
-const DEBUG = !!process.env.PI_TASKS_DEBUG;
-function debug(...args: unknown[]) {
-  if (DEBUG) console.error("[pi-tasks]", ...args);
-}
 
 // ---- Helpers ----
 
@@ -47,7 +35,7 @@ function textResult(msg: string) {
 }
 
 /** Task tool names — used to detect task tool usage for reminder suppression. */
-const TASK_TOOL_NAMES = new Set(["TaskCreate", "TaskList", "TaskGet", "TaskUpdate", "TaskOutput", "TaskStop", "TaskExecute"]);
+const TASK_TOOL_NAMES = new Set(["TaskCreate", "TaskList", "TaskGet", "TaskUpdate"]);
 
 /** How many turns without task tool usage before injecting a reminder. */
 const REMINDER_INTERVAL = 4;
@@ -82,118 +70,9 @@ export default function (pi: ExtensionAPI) {
   // For project scope (or env override), create store immediately.
   // For session scope, start with in-memory and upgrade once we have the session ID.
   let store = new TaskStore(resolveStorePath());
-  const tracker = new ProcessTracker();
+  store.migrateLegacyExecutionTasks();
   const widget = new TaskWidget(store, cfg);
-
-  // ── Subagent integration state ──
-  /** Latest ExtensionContext — refreshed on every tool execution so cascade always has a valid one. */
-  let latestCtx: ExtensionContext | undefined;
-  /** Cascade config — set by TaskExecute, consumed by completion listener. */
-  let cascadeConfig: { additionalContext?: string; model?: string; maxTurns?: number } | undefined;
-  /** Maps agent IDs to task IDs for O(1) completion lookup. */
-  const agentTaskMap = new Map<string, string>();
-
-
-  /** Build a prompt for a task being executed by a subagent.
-   *  Injects completed dependency results so cascaded agents have context from prerequisites.
-   */
-  function buildTaskPrompt(
-    task: { id: string; subject: string; description: string; blockedBy?: string[] },
-    additionalContext?: string,
-  ): string {
-    let prompt = `You are executing task #${task.id}: "${task.subject}"\n\n${task.description}`;
-
-    // Inject completed dependency results so cascaded agents have full context
-    if (task.blockedBy && task.blockedBy.length > 0) {
-      const depResults: string[] = [];
-      for (const depId of task.blockedBy) {
-        const dep = store.get(depId);
-        if (dep?.metadata?.result) {
-          const result = dep.metadata.result.length > 4000
-            ? dep.metadata.result.slice(0, 4000) + "\n\n[... truncated — use TaskGet for full output]"
-            : dep.metadata.result;
-          depResults.push(`### Task #${depId}: ${dep.subject}\n${result}`);
-        }
-      }
-      if (depResults.length > 0) {
-        prompt += `\n\n## Prerequisite task results\n\n${depResults.join("\n\n")}`;
-      }
-    }
-
-    if (additionalContext) prompt += `\n\n${additionalContext}`;
-    prompt += `\n\nComplete this task fully. Do not attempt to manage tasks yourself.`;
-    return prompt;
-  }
-
   const autoClear = new AutoClearManager(() => store, () => cfg.autoClearCompleted ?? "on_list_complete", AUTO_CLEAR_DELAY);
-
-  // ── Subagent completion listener ──
-  // Listens for subagent lifecycle events to update task status and optionally cascade.
-
-  // Success → mark task completed, cascade if enabled
-  pi.events.on("subagents:completed", async (data) => {
-    const { id, result } = data as { id: string; result?: string };
-    const taskId = agentTaskMap.get(id);
-    if (!taskId) return;
-    agentTaskMap.delete(id);
-    const task = store.get(taskId);
-    if (!task) return;
-
-    store.update(task.id, { status: "completed", metadata: { ...task.metadata, result } });
-    widget.setActiveTask(task.id, false);
-
-    // Auto-cascade: find unblocked dependents with agentType
-    if ((cfg.autoCascade ?? false) && cascadeConfig && latestCtx) {
-      const unblocked = store.list().filter(t =>
-        t.status === "pending" &&
-        t.metadata?.agentType &&
-        t.blockedBy.includes(task.id) &&
-        t.blockedBy.every(depId => store.get(depId)?.status === "completed")
-      );
-      for (const next of unblocked) {
-        store.update(next.id, { status: "in_progress" });
-        const prompt = buildTaskPrompt(next, cascadeConfig.additionalContext);
-        try {
-          const agentId = await spawnSubagent(next.metadata.agentType, prompt, {
-            description: next.subject,
-            foreground: false,
-            maxTurns: cascadeConfig.maxTurns,
-            ...(cascadeConfig.model ? { model: cascadeConfig.model } : {}),
-          });
-          agentTaskMap.set(agentId, next.id);
-          store.update(next.id, { owner: agentId, metadata: { ...next.metadata, agentId } });
-          widget.setActiveTask(next.id);
-        } catch (err: any) {
-          store.update(next.id, { status: "pending", metadata: { ...next.metadata, lastError: err.message } });
-        }
-      }
-    }
-    autoClear.trackCompletion(task.id, cadence.currentTurn);
-    widget.update();
-  });
-
-  // Failure → store error, revert to pending, don't cascade (branch stops)
-  // Intentional stop (status === "stopped") → mark completed, preserve partial result
-  pi.events.on("subagents:failed", (data) => {
-    const { id, error, result, status } = data as { id: string; error?: string; result?: string; status: string };
-    const taskId = agentTaskMap.get(id);
-    if (!taskId) return;
-    agentTaskMap.delete(id);
-    const task = store.get(taskId);
-    if (!task) return;
-
-    if (status === "stopped") {
-      // Intentional stop — mark completed, preserve partial result
-      store.update(task.id, { status: "completed", metadata: { ...task.metadata, result: result || task.metadata?.result } });
-      autoClear.trackCompletion(task.id, cadence.currentTurn);
-    } else {
-      // Actual error — revert to pending
-      store.update(task.id, { status: "pending", metadata: { ...task.metadata, lastError: error || status } });
-      autoClear.resetBatchCountdown();
-    }
-    widget.setActiveTask(task.id, false);
-    widget.update();
-  });
 
   // ── Session-scoped store upgrade ──
   // For session scope, the store starts in-memory (no session ID at init time).
@@ -207,6 +86,7 @@ export default function (pi: ExtensionAPI) {
       const sessionId = ctx.sessionManager.getSessionId();
       const path = resolveStorePath(sessionId);
       store = new TaskStore(path);
+      store.migrateLegacyExecutionTasks();
       widget.setStore(store);
     }
     storeUpgraded = true;
@@ -225,6 +105,8 @@ export default function (pi: ExtensionAPI) {
         store.clearCompleted();
         if (taskScope === "session") store.deleteFileIfEmpty();
       } else {
+        // Legacy execution tasks are migrated during store upgrade, so the
+        // widget only reflects states users can still manage.
         widget.update();
       }
     }
@@ -241,7 +123,6 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("turn_start", async (_event, ctx) => {
     onTurnStart(cadence);
-    latestCtx = ctx;
     widget.setUICtx(ctx.ui as UICtx);
     upgradeStoreIfNeeded(ctx);
     if (autoClear.onTurnStart(cadence.currentTurn)) widget.update();
@@ -307,7 +188,6 @@ export default function (pi: ExtensionAPI) {
   // Grab UI context early — before_agent_start fires before any tool calls,
   // so persisted tasks show up immediately on session start.
   pi.on("before_agent_start", async (_event, ctx) => {
-    latestCtx = ctx;
     widget.setUICtx(ctx.ui as UICtx);
     upgradeStoreIfNeeded(ctx);
     showPersistedTasks();
@@ -317,7 +197,6 @@ export default function (pi: ExtensionAPI) {
   // On /new: reset all session-scoped state so the store switches to the new session file.
   // On resume: reload persisted tasks from the existing session file.
   pi.on("session_switch" as any, async (event: any, ctx: ExtensionContext) => {
-    latestCtx = ctx;
     widget.setUICtx(ctx.ui as UICtx);
 
     const isResume = event?.reason === "resume";
@@ -333,13 +212,16 @@ export default function (pi: ExtensionAPI) {
       store.clearAll();
     }
 
+    // Named / explicit file-backed stores can also contain legacy execution state.
+    if (storeUpgraded && (piTasks || taskScope === "project")) {
+      store.migrateLegacyExecutionTasks();
+    }
     upgradeStoreIfNeeded(ctx);
     showPersistedTasks(isResume);
   });
 
-  // Keep latestCtx fresh on every tool execution as well.
+  // Keep the widget store and UI context fresh on every tool execution as well.
   pi.on("tool_execution_start", async (_event, ctx) => {
-    latestCtx = ctx;
     widget.setUICtx(ctx.ui as UICtx);
     upgradeStoreIfNeeded(ctx);
     widget.update();
@@ -392,7 +274,7 @@ All tasks are created with status \`pending\`.
 - Include enough detail in the description for another agent to understand and complete the task
 - After creating tasks, use TaskUpdate to set up dependencies (blocks/blockedBy) if needed
 - Check TaskList first to avoid creating duplicate tasks
-- Optional: set \`agentType\` (e.g., "general-purpose", "Explore") only if this task should run as a subagent via TaskExecute; otherwise omit it.`,
+- Use metadata only for values your workflow needs beyond the built-in task fields.`,
     promptGuidelines: [
       "When working on complex multi-step tasks, use TaskCreate to track progress and TaskUpdate to update status.",
       "Mark tasks as in_progress before starting work and completed when done.",
@@ -402,14 +284,12 @@ All tasks are created with status \`pending\`.
       subject: Type.String({ description: "A brief title for the task" }),
       description: Type.String({ description: "A detailed description of what needs to be done" }),
       activeForm: Type.Optional(Type.String({ description: "Present continuous form shown in spinner when in_progress (e.g., 'Running tests')" })),
-      agentType: Type.Optional(Type.String({ description: "Agent type for subagent execution (e.g., 'general-purpose', 'Explore'). Tasks with agentType can be started via TaskExecute." })),
       metadata: Type.Optional(Type.Record(Type.String(), Type.Any(), { description: "Arbitrary metadata to attach to the task" })),
     }),
 
     execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
       autoClear.resetBatchCountdown();
       const meta = params.metadata ?? {};
-      if (params.agentType) meta.agentType = params.agentType;
       const task = store.create(params.subject, params.description, params.activeForm, Object.keys(meta).length > 0 ? meta : undefined);
       widget.update();
       return Promise.resolve(textResult(`Task #${task.id} created successfully: ${task.subject}`));
@@ -439,7 +319,7 @@ Returns a summary of each task:
 - **id**: Task identifier (use with TaskGet, TaskUpdate)
 - **subject**: Brief description of the task
 - **status**: 'pending', 'in_progress', or 'completed'
-- **owner**: Agent ID if assigned, empty if available
+- **owner**: Owner or assignee label if set, empty if available
 - **blockedBy**: List of open task IDs that must be resolved first (tasks with blockedBy cannot be claimed until dependencies resolve)
 
 Use TaskGet with a specific task ID to view full details including description and comments.`,
@@ -597,7 +477,7 @@ Returns full task details:
 - **subject**: Change the task title (imperative form, e.g., "Run tests")
 - **description**: Change the task description
 - **activeForm**: Present continuous form shown in spinner when in_progress (e.g., "Running tests")
-- **owner**: Change the task owner (agent name)
+- **owner**: Change the task owner or assignee label
 - **metadata**: Merge metadata keys into the task (set a key to null to delete it)
 - **addBlocks**: Mark tasks that cannot start until this one completes
 - **addBlockedBy**: Mark tasks that must complete before this one can start
@@ -679,246 +559,6 @@ Set up task dependencies:
         msg += ` (warning: ${warnings.join("; ")})`;
       }
       return Promise.resolve(textResult(msg));
-    },
-  });
-
-  // ──────────────────────────────────────────────────
-  // Tool 5: TaskOutput
-  // ──────────────────────────────────────────────────
-
-  pi.registerTool({
-    name: "TaskOutput",
-    label: "TaskOutput",
-    description: `- Retrieves output from a running or completed task (background shell, agent, or remote session)
-- Takes a task_id parameter identifying the task
-- Returns the task output along with status information
-- Use block=true (default) to wait for task completion
-- Use block=false for non-blocking check of current status
-- Task IDs can be found using the /tasks command
-- Works with all task types: background shells, async agents, and remote sessions`,
-    parameters: Type.Object({
-      task_id: Type.String({ description: "The task ID to get output from" }),
-      block: Type.Boolean({ description: "Whether to wait for completion", default: true }),
-      timeout: Type.Number({ description: "Max wait time in ms", default: 30000, minimum: 0, maximum: 600000 }),
-    }),
-
-    async execute(_toolCallId, params, signal, _onUpdate, _ctx) {
-      const { task_id, block, timeout } = params;
-
-      const processOutput = tracker.getOutput(task_id);
-      if (!processOutput) {
-        // No shell process — check if this is a subagent task
-        // Support both task IDs and agent IDs (resolve agent ID → task ID)
-        let resolvedId = task_id;
-        if (!store.get(resolvedId)) {
-          // Check if this is an agent ID mapped to a task
-          for (const [agentId, taskId] of agentTaskMap) {
-            if (agentId === task_id || agentId.startsWith(task_id)) { resolvedId = taskId; break; }
-          }
-        }
-        const task = store.get(resolvedId);
-        if (!task) throw new Error(`No task found with ID ${task_id}`);
-
-        if (task.metadata?.agentId) {
-          // Subagent task — wait for completion if blocking
-          if (block && task.status === "in_progress") {
-            await new Promise<void>((resolve) => {
-              const timer = setTimeout(() => { unsubOk(); unsubFail(); resolve(); }, timeout ?? 30000);
-              const cleanup = () => { clearTimeout(timer); resolve(); };
-              const unsubOk = pi.events.on("subagents:completed", (d: unknown) => {
-                if ((d as any).id === task.metadata?.agentId) { unsubOk(); unsubFail(); cleanup(); }
-              });
-              const unsubFail = pi.events.on("subagents:failed", (d: unknown) => {
-                if ((d as any).id === task.metadata?.agentId) { unsubOk(); unsubFail(); cleanup(); }
-              });
-              // Re-check in case status changed between the outer check and listener registration
-              const current = store.get(task_id);
-              if (current && current.status !== "in_progress") { unsubOk(); unsubFail(); cleanup(); }
-              signal?.addEventListener("abort", () => { unsubOk(); unsubFail(); cleanup(); }, { once: true });
-            });
-          }
-          const updated = store.get(task_id) ?? task;
-          return textResult(`Task #${task_id} [${updated.status}] — subagent ${task.metadata.agentId}`);
-        }
-        throw new Error(`No background process for task ${task_id}`);
-      }
-
-      if (block && processOutput.status === "running") {
-        const result = await tracker.waitForCompletion(task_id, timeout ?? 30000, signal ?? undefined);
-        if (result) {
-          return textResult(
-            `Task #${task_id} (${result.status})${result.exitCode !== undefined ? ` exit code: ${result.exitCode}` : ""}\n\n${result.output}`,
-          );
-        }
-      }
-
-      return textResult(
-        `Task #${task_id} (${processOutput.status})${processOutput.exitCode !== undefined ? ` exit code: ${processOutput.exitCode}` : ""}\n\n${processOutput.output}`,
-      );
-    },
-  });
-
-  // ──────────────────────────────────────────────────
-  // Tool 6: TaskStop
-  // ──────────────────────────────────────────────────
-
-  pi.registerTool({
-    name: "TaskStop",
-    label: "TaskStop",
-    description: `
-- Stops a running background task by its ID
-- Takes a task_id parameter identifying the task to stop
-- Returns a success or failure status
-- Use this tool when you need to terminate a long-running task`,
-    parameters: Type.Object({
-      task_id: Type.Optional(Type.String({ description: "The ID of the background task to stop" })),
-      shell_id: Type.Optional(Type.String({ description: "Deprecated: use task_id instead" })),
-    }),
-
-    async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
-      const taskId = params.task_id ?? params.shell_id;
-      if (!taskId) throw new Error("task_id is required");
-
-      const stopped = await tracker.stop(taskId);
-      if (!stopped) {
-        // No shell process — check if this is a subagent task
-        // Support both task IDs and agent IDs
-        let resolvedId = taskId;
-        if (!store.get(resolvedId)) {
-          for (const [agentId, tId] of agentTaskMap) {
-            if (agentId === taskId || agentId.startsWith(taskId)) { resolvedId = tId; break; }
-          }
-        }
-        const task = store.get(resolvedId);
-        if (task?.metadata?.agentId && task.status === "in_progress") {
-          store.update(taskId, { status: "completed" });
-          autoClear.trackCompletion(taskId, cadence.currentTurn);
-          await abortSubagent(task.metadata.agentId);
-          widget.setActiveTask(taskId, false);
-          widget.update();
-          return textResult(`Task #${taskId} stopped successfully`);
-        }
-        throw new Error(`No running background process for task ${taskId}`);
-      }
-
-      store.update(taskId, { status: "completed" });
-      autoClear.trackCompletion(taskId, cadence.currentTurn);
-      widget.setActiveTask(taskId, false);
-      widget.update();
-      return textResult(`Task #${taskId} stopped successfully`);
-    },
-  });
-
-  // ──────────────────────────────────────────────────
-  // Tool 7: TaskExecute
-  // ──────────────────────────────────────────────────
-
-  pi.registerTool({
-    name: "TaskExecute",
-    label: "TaskExecute",
-    description: `Execute one or more tasks as subagents.
-
-## When to Use This Tool
-
-- To start execution of tasks that have \`agentType\` set (created via TaskCreate with agentType parameter)
-- Tasks must be \`pending\` with all blockedBy dependencies \`completed\`
-- Each task runs as an independent background subagent
-
-## Parameters
-
-- **task_ids**: Array of task IDs to execute
-- **additional_context**: Extra context appended to each agent's prompt
-- **model**: Model override for agents (e.g., "sonnet", "haiku")
-- **max_turns**: Maximum turns per agent`,
-    promptGuidelines: [
-      "Never use the Agent tool for tasks launched via TaskExecute — agents are already running.",
-      "Tasks require `agentType` to be executed — set it via the TaskCreate `agentType` parameter at creation, or via TaskUpdate metadata (e.g., {\"agentType\": \"general-purpose\"}) before calling TaskExecute; otherwise tasks are skipped."
-    ],
-    parameters: Type.Object({
-      task_ids: Type.Array(Type.String(), { description: "Task IDs to execute as subagents" }),
-      additional_context: Type.Optional(Type.String({ description: "Extra context for agent prompts" })),
-      model: Type.Optional(Type.String({ description: "Model override for agents" })),
-      max_turns: Type.Optional(Type.Number({ description: "Max turns per agent", minimum: 1 })),
-    }),
-
-    async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
-      const subagents = await getSubagentsService();
-      if (!subagents) {
-        return textResult(
-          "Subagent execution is currently unavailable. " +
-          "Ensure the @gotgenes/pi-subagents extension is loaded and try again."
-        );
-      }
-
-      const results: string[] = [];
-      const launched: string[] = [];
-
-      for (const taskId of params.task_ids) {
-        const task = store.get(taskId);
-        if (!task) {
-          results.push(`#${taskId}: not found`);
-          continue;
-        }
-        if (task.status !== "pending") {
-          results.push(`#${taskId}: not pending (status: ${task.status})`);
-          continue;
-        }
-        if (!task.metadata?.agentType) {
-          results.push(`#${taskId}: no agentType set — create with agentType parameter or update metadata`);
-          continue;
-        }
-
-        // Check all blockers are completed
-        const openBlockers = task.blockedBy.filter(bid => {
-          const blocker = store.get(bid);
-          return !blocker || blocker.status !== "completed";
-        });
-        if (openBlockers.length > 0) {
-          results.push(`#${taskId}: blocked by ${openBlockers.map(id => "#" + id).join(", ")}`);
-          continue;
-        }
-
-        // Mark in_progress and spawn agent via the subagent service
-        store.update(taskId, { status: "in_progress" });
-        const prompt = buildTaskPrompt(task, params.additional_context);
-        try {
-          const agentId = await spawnSubagent(task.metadata.agentType, prompt, {
-            description: task.subject,
-            foreground: false,
-            maxTurns: params.max_turns,
-            ...(params.model ? { model: params.model } : {}),
-          });
-          agentTaskMap.set(agentId, taskId);
-          store.update(taskId, { owner: agentId, metadata: { ...task.metadata, agentId } });
-          widget.setActiveTask(taskId);
-          launched.push(`#${taskId} → agent ${agentId}`);
-        } catch (err: any) {
-          debug(`spawn:error task=#${taskId}`, err);
-          store.update(taskId, { status: "pending" });
-          results.push(`#${taskId}: spawn failed — ${err.message}`);
-        }
-      }
-
-      // Save cascade config for the completion listener
-      cascadeConfig = {
-        additionalContext: params.additional_context,
-        model: params.model,
-        maxTurns: params.max_turns,
-      };
-
-      widget.update();
-
-      const lines: string[] = [];
-      if (launched.length > 0) {
-        lines.push(
-          `Launched ${launched.length} agent(s):\n${launched.join("\n")}\n` +
-          `Use TaskOutput to check progress. Do not spawn additional agents for these tasks.`
-        );
-      }
-      if (results.length > 0) lines.push(`Skipped:\n${results.join("\n")}`);
-      if (lines.length === 0) lines.push("No tasks to execute.");
-
-      return textResult(lines.join("\n\n"));
     },
   });
 
